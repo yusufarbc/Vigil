@@ -72,6 +72,36 @@ clean:
 	docker system prune -f
 
 # ---------------------------------------------------------------------------
+# GKE deploy (requires GCP_PROJECT and IMAGE_TAG env vars)
+# Usage: GCP_PROJECT=my-project IMAGE_TAG=abc1234 make apply-k8s
+# ---------------------------------------------------------------------------
+
+apply-k8s:
+	@test -n "$(GCP_PROJECT)" || (echo "ERROR: GCP_PROJECT is not set" && exit 1)
+	@test -n "$(IMAGE_TAG)"   || (echo "ERROR: IMAGE_TAG is not set"   && exit 1)
+	@echo "Applying K8s manifests for project=$(GCP_PROJECT) tag=$(IMAGE_TAG)..."
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst < infrastructure/k8s/namespace.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst < infrastructure/k8s/services/configmap.yaml | kubectl apply -f -
+	kubectl apply -f infrastructure/k8s/eck/
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/detection-service.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/alert-gateway.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/enrichment-service.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/masking-service.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/llm-orchestrator.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/case-service.yaml | kubectl apply -f -
+	GCP_PROJECT=$(GCP_PROJECT) IMAGE_TAG=$(IMAGE_TAG) \
+	  envsubst '$$GCP_PROJECT $$IMAGE_TAG' < infrastructure/k8s/services/bff.yaml | kubectl apply -f -
+	@echo "Done. Check pod status: kubectl get pods -n sentinel"
+
+# ---------------------------------------------------------------------------
 # Pub/Sub topic bootstrap (run once against the emulator)
 # ---------------------------------------------------------------------------
 

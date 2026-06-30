@@ -8,44 +8,119 @@ An open-source, AI-assisted Security & Network Operations platform built on the 
 
 ## Architecture
 
+### Alert-to-Decision Pipeline
+
+```mermaid
+flowchart LR
+    subgraph src["Log Sources"]
+        W["Windows\nWinlogbeat · WEF"]
+        FW["Firewall\nFortiGate · PaloAlto"]
+        EDR["EDR\nKaspersky"]
+        SYS["Syslog\nRFC 3164/5424"]
+    end
+
+    subgraph elastic["Elasticsearch — ECK on GKE"]
+        IDX[("Indices\nhot tier 0–14 d")]
+        SIEM["Kibana SIEM\nBasic detection rules\n40+ MITRE ATT&CK"]
+    end
+
+    subgraph pubsub["GCP Pub/Sub"]
+        P1(["sentinel\n.alerts"])
+        P2(["sentinel\n.incidents"])
+        P3(["sentinel\n.masked-incidents"])
+        P4(["sentinel\n.triage-decisions"])
+    end
+
+    subgraph services["Sentinel Services — GKE Autopilot"]
+        DS["detection-service\nGo\npoll · normalize"]
+        AG["alert-gateway\nGo\ndedup · correlate\nrisk-score"]
+        EN["enrichment-service\nPython\nGeoIP · TI · asset"]
+        MSK["masking-service\nPython\nPII → tokens\nreverse-map in ES"]
+        LLM["llm-orchestrator\nPython\nONLY LLM caller"]
+        CS["case-service\nGo\nunmask · human review"]
+        BFF["bff\nGo\nanalyst API · UI"]
+    end
+
+    VA(["Vertex AI\nGemini 2.5 Flash"])
+
+    SIEM -- "KQL · EQL · threshold" --> IDX
+    W & FW & EDR & SYS -->|"Logstash / Beats / OTel"| IDX
+    IDX -->|"poll alerts"| DS
+    DS --> P1 --> AG
+    AG --> P2 --> EN
+    EN -->|"HTTP /mask"| MSK
+    MSK --> P3 --> LLM
+    LLM <-->|"JSON schema\ntriage"| VA
+    LLM --> P4 --> CS --> BFF
+
+    style VA  fill:#4285f4,color:#fff,stroke:#2a6dd9
+    style LLM fill:#34a853,color:#fff,stroke:#1e7e34
+    style MSK fill:#ea4335,color:#fff,stroke:#c0392b
+    style IDX fill:#ff6d00,color:#fff,stroke:#e65100
 ```
-Logstash / Beats / OTel
-        │
-        ▼
-   Elasticsearch ◄──── Kibana SIEM detection rules (Basic tier)
-        │                        │
-        │              .alerts-security.alerts-*
-        │                        │
-        ▼                        ▼
-detection-service  ──[sentinel.alerts]──► alert-gateway
-                                              │
-                                     [sentinel.incidents]
-                                              │
-                                    enrichment-service
-                                    (GeoIP · TI · asset)
-                                              │
-                                    masking-service  ◄── only PII reverse-map holder
-                                              │
-                                  [sentinel.masked-incidents]
-                                              │
-                                    llm-orchestrator  ◄── ONLY LLM caller
-                                    (Vertex AI / mock)
-                                              │
-                                   [sentinel.triage-decisions]
-                                              │
-                                       case-service
-                                   (unmask · human review)
-                                              │
-                                          bff / UI
+
+### GCP Deployment Architecture
+
+```mermaid
+flowchart TB
+    subgraph gke["GKE Autopilot"]
+        subgraph ns["namespace: sentinel"]
+            subgraph eck["ECK — Elasticsearch Cluster (3 nodes · PDB · anti-affinity)"]
+                ES1[("ES node 1\n50 Gi SSD")]
+                ES2[("ES node 2\n50 Gi SSD")]
+                ES3[("ES node 3\n50 Gi SSD")]
+                KIB["Kibana"]
+            end
+            subgraph svcs["Microservices (HPA)"]
+                DS2["detection-service\n1–3 pods"]
+                AG2["alert-gateway\n2–5 pods"]
+                EN2["enrichment-service\n1–3 pods"]
+                MSK2["masking-service\n2–4 pods"]
+                LLM2["llm-orchestrator\n1–2 pods"]
+                CS2["case-service\n1–3 pods"]
+                BFF2["bff\n2–5 pods\nLoadBalancer :80"]
+            end
+        end
+    end
+
+    subgraph managed["GCP Managed Services"]
+        PS["Cloud Pub/Sub\n5 topics · 4 subscriptions"]
+        VA2["Vertex AI\nGemini 2.5 Flash\nus-central1"]
+        AR["Artifact Registry\ncontainer images"]
+        GCS["Cloud Storage\nES snapshots\nStandard → Archive"]
+        WI["Workload Identity\nno API key files in pods"]
+    end
+
+    subgraph cicd["CI / CD — GitHub Actions"]
+        direction LR
+        CI1["lint → test\n→ SAST → SCA"]
+        CI2["Docker build\n→ Trivy scan"]
+        CI3["push to AR\nmain branch only"]
+        CI1 --> CI2 --> CI3
+    end
+
+    svcs <-->|"publish / subscribe"| PS
+    LLM2 <-->|"Workload Identity auth"| VA2
+    ES1 & ES2 & ES3 -->|"ILM snapshot\nat 14 days"| GCS
+    AR -->|"image pull"| svcs
+    WI -. "authenticates" .-> svcs
+    WI -. "authenticates" .-> eck
+    CI3 -->|"SHA-tagged image"| AR
+
+    style gke     fill:#e8f5e9,stroke:#388e3c
+    style eck     fill:#fff8e1,stroke:#f9a825
+    style svcs    fill:#e3f2fd,stroke:#1976d2
+    style managed fill:#fce4ec,stroke:#c62828
+    style cicd    fill:#f3e5f5,stroke:#7b1fa2
 ```
 
 **Core principles (see [CLAUDE.md](CLAUDE.md)):**
 
-- Deterministic core, LLM as ranker. Rule-based logic decides; LLM only suggests.
-- LLM triggered **per incident**, never per alert or per log.
-- All LLM input is masked (no PII), all output is validated JSON, all calls are audit-logged.
-- Only `masking-service` holds plaintext PII reverse-maps.
-- Only `llm-orchestrator` calls the LLM API.
+- **Deterministic core, LLM as ranker.** Rule-based logic decides; LLM only enriches and suggests.
+- **LLM triggered per incident** — never per alert or per log. Cuts LLM request count by 10–50×.
+- **All LLM input is masked** (no PII), all output is validated JSON, all calls are audit-logged.
+- **Only `masking-service`** holds plaintext PII reverse-maps (stored in Elasticsearch — multi-replica safe).
+- **Only `llm-orchestrator`** calls the LLM API.
 
 ---
 
@@ -69,7 +144,7 @@ detection-service  ──[sentinel.alerts]──► alert-gateway
 
 ```bash
 # 1. Clone and enter
-git clone https://github.com/<your-org>/sentinel.git && cd sentinel
+git clone https://github.com/yusufarbc/Vigil.git && cd Vigil
 
 # 2. Copy env file (defaults work for local dev)
 cp .env.example .env
@@ -88,23 +163,49 @@ make pubsub-init
 
 ---
 
+## CI / CD
+
+Two-branch flow (ADR-011):
+
+```text
+feature branch
+      │
+      ▼ PR
+   test ──► lint → test → SAST/SCA → Docker build → Trivy scan
+      │
+      ▼ PR (requires green pipeline on test)
+   main ──► same gates → push images to Artifact Registry
+```
+
+GitHub secrets required for image push (`main` only):
+
+| Secret | Value |
+| --- | --- |
+| `GCP_PROJECT` | GCP project ID |
+| `WIF_PROVIDER` | Workload Identity Federation provider resource name |
+| `WIF_SERVICE_ACCOUNT` | GSA email with `roles/artifactregistry.writer` |
+
+---
+
 ## Infrastructure
 
-```
+```text
 infrastructure/
-├── k8s/eck/              # ECK 3-node Elasticsearch cluster + Kibana + ILM + GCS snapshots
-├── k8s/services/         # Kubernetes manifests for Sentinel microservices
+├── k8s/
+│   ├── namespace.yaml           # sentinel namespace (apply first)
+│   ├── eck/                     # ECK: 3-node ES cluster, Kibana, ILM, GCS snapshot repo
+│   └── services/                # K8s manifests for all 7 microservices + shared ConfigMap
 ├── config/
-│   ├── detection-rules/  # 40+ MITRE ATT&CK-mapped SIEM rules (KQL + EQL)
-│   ├── logstash/         # Pipelines: FortiGate, Kaspersky, PaloAlto, Windows WEF, Syslog
-│   ├── elasticsearch/    # elasticsearch.yml
-│   ├── kibana/           # kibana.yml
-│   └── elastic/          # Fleet policy templates
-├── client-configs/       # Windows GPO: Winlogbeat, Metricbeat, Heartbeat, Sysmon
-└── scripts/              # ELK bare-metal setup (Ubuntu Jammy), Sysmon installer
+│   ├── detection-rules/         # 40+ MITRE ATT&CK-mapped SIEM rules (KQL + EQL)
+│   ├── logstash/                # Pipelines: FortiGate, Kaspersky, PaloAlto, Windows WEF, Syslog
+│   ├── elasticsearch/           # elasticsearch.yml
+│   ├── kibana/                  # kibana.yml
+│   └── elastic/                 # Fleet policy templates
+├── client-configs/              # Windows GPO: Winlogbeat, Metricbeat, Heartbeat, Sysmon
+└── scripts/                     # ELK bare-metal setup (Ubuntu Jammy), Sysmon installer
 ```
 
-### Ingestion sources (Logstash pipelines)
+### Ingestion sources
 
 | Source | Pipeline |
 | --- | --- |
@@ -117,55 +218,52 @@ infrastructure/
 
 ### Detection rules
 
-40+ MITRE ATT&CK-mapped detection rules in [`infrastructure/config/detection-rules/siem.rules.yml`](infrastructure/config/detection-rules/siem.rules.yml), covering:
-
-- Initial Access & Execution (Office macro abuse, browser exploitation, WScript/PowerShell chains)
-- Credential Access (LSASS dump, RDP brute force)
-- Persistence (Registry Run keys, Scheduled Tasks, Windows Services)
-- Lateral Movement (WMI remote execution, PsExec, SMB shares)
-- Defense Evasion (Defender disabled, Windows event logs cleared)
-- Firewall anomalies (bogon IPs, port scans, geo-based anomalies)
+40+ MITRE ATT&CK-mapped rules in [`infrastructure/config/detection-rules/siem.rules.yml`](infrastructure/config/detection-rules/siem.rules.yml), covering:
+Initial Access · Execution · Credential Access · Persistence · Lateral Movement · Defense Evasion · Firewall anomalies.
 
 ---
 
 ## Development
 
 ```bash
-# All services
-make test       # go test + pytest for all services
+make test       # go test -race + pytest for all services
 make lint       # golangci-lint + ruff for all services
 make build      # docker compose build
+```
 
+```bash
 # Individual Go service
-cd services/detection-service
-go mod tidy
-go test ./... -race
+cd services/detection-service && go test ./... -race
 
 # Individual Python service
 cd services/masking-service
-python -m venv .venv && source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -e .
+pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
 ---
 
-## Production (GKE + ECK)
+## Production Deploy (GKE)
 
-See [`infrastructure/k8s/eck/`](infrastructure/k8s/eck/) for:
+```bash
+# Apply all K8s manifests in order
+GCP_PROJECT=your-project IMAGE_TAG=abc1234 make apply-k8s
 
-- 3-node Elasticsearch cluster with PodDisruptionBudget and pod anti-affinity (ADR-009)
-- ILM policy: 14-day hot tier → GCS snapshot → delete from hot (ADR-010)
-- GCS snapshot repository registration
+# Or manually step by step:
+kubectl apply -f infrastructure/k8s/namespace.yaml
+kubectl apply -f infrastructure/k8s/eck/
+envsubst < infrastructure/k8s/services/configmap.yaml | kubectl apply -f -
+# ... then each service manifest
+```
 
-**Credentials:** Workload Identity — no API key files in pods (ADR-006).
-**LLM provider:** Set `LLM_PROVIDER=vertex` and `GCP_PROJECT=<your-project>` in the deployment.
+**Credentials:** Workload Identity — no API key files in pods (ADR-006).  
+**LLM:** Set `LLM_PROVIDER=vertex` and `GCP_PROJECT=<your-project>` (already set in the llm-orchestrator manifest).
 
 ---
 
-## Decisions
+## Architecture Decisions
 
-Architecture decision records are in [DECISIONS.md](DECISIONS.md). Key decisions:
+Full log in [DECISIONS.md](DECISIONS.md). Key decisions:
 
 | ADR | Decision |
 | --- | --- |
@@ -176,6 +274,8 @@ Architecture decision records are in [DECISIONS.md](DECISIONS.md). Key decisions
 | ADR-012 | Go (operational) + Python (AI/enrichment) |
 | ADR-013 | GCP Pub/Sub (not Kafka) |
 | ADR-014 | Elastic Basic-tier audit: ELSER / risk scoring / ML jobs blocked |
+| ADR-015 | masking-service reverse-map stored in Elasticsearch (multi-replica safe) |
+| ADR-016 | GKE Autopilot · `node.store.allow_mmap=false` for Autopilot compatibility |
 
 ---
 
