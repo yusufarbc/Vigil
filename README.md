@@ -277,8 +277,3 @@ Full log in [DECISIONS.md](DECISIONS.md). Key decisions:
 | ADR-015 | masking-service reverse-map stored in Elasticsearch (multi-replica safe) |
 | ADR-016 | GKE Autopilot · `node.store.allow_mmap=false` for Autopilot compatibility |
 
----
-
-## License
-
-[MIT](LICENSE)
