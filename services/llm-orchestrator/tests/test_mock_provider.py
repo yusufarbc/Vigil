@@ -9,9 +9,7 @@ from app.triage_schema import TriageDecision
 
 def test_mock_returns_valid_json():
     provider = MockLLMProvider()
-    response = asyncio.get_event_loop().run_until_complete(
-        provider.complete(system_prompt="sys", data_block="data")
-    )
+    response = asyncio.run(provider.complete(system_prompt="sys", data_block="data"))
     parsed = json.loads(response.content)
     assert "severity_suggestion" in parsed
     assert "confidence" in parsed
@@ -19,9 +17,7 @@ def test_mock_returns_valid_json():
 
 def test_mock_response_passes_schema_validation():
     provider = MockLLMProvider()
-    response = asyncio.get_event_loop().run_until_complete(
-        provider.complete(system_prompt="sys", data_block="data")
-    )
+    response = asyncio.run(provider.complete(system_prompt="sys", data_block="data"))
     raw = json.loads(response.content)
     # Should not raise
     decision = TriageDecision(

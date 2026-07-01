@@ -38,7 +38,7 @@ def _make_incident() -> Incident:
 def test_pipeline_no_enrichers_produces_base_output():
     pipeline = EnrichmentPipeline(enrichers=[])
     incident = _make_incident()
-    result = asyncio.get_event_loop().run_until_complete(pipeline.run(incident))
+    result = asyncio.run(pipeline.run(incident))
 
     assert result.incident_id == "inc-001"
     assert result.risk_score == 25
@@ -50,5 +50,5 @@ def test_pipeline_no_enrichers_produces_base_output():
 def test_summary_contains_mitre_technique():
     pipeline = EnrichmentPipeline(enrichers=[])
     incident = _make_incident()
-    result = asyncio.get_event_loop().run_until_complete(pipeline.run(incident))
+    result = asyncio.run(pipeline.run(incident))
     assert "T1059" in result.summary
